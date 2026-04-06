@@ -31,8 +31,9 @@ data class LockerStatus(
 
 data class PendingLockerPayment(
     val lockerId: String,
-    val scannedQrValue: String,
-    val selectedPlanId: String
+    val scannedQrValue: String?,
+    val selectedPlanId: String,
+    val paymentMode: String
 )
 
 data class LockerPaymentPlan(
@@ -193,7 +194,37 @@ class KeylessViewModel(application: Application) : AndroidViewModel(application)
         pendingLockerPayment = PendingLockerPayment(
             lockerId = lockerId,
             scannedQrValue = scannedQrValue,
-            selectedPlanId = PLAN_3H
+            selectedPlanId = PLAN_3H,
+            paymentMode = PAYMENT_MODE_OCCUPY
+        )
+        persistPendingPayment(pendingLockerPayment)
+        onSuccess()
+    }
+
+    fun prepareLockerExtensionPayment(
+        lockerId: String,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val userEmail = currentUser?.email
+        if (userEmail.isNullOrBlank()) {
+            onError("Please log in again.")
+            return
+        }
+        val cachedStatus = lockerStatusCache[lockerId]
+        if (cachedStatus == null || !cachedStatus.isOccupied) {
+            onError("Locker is not occupied.")
+            return
+        }
+        if (!cachedStatus.occupiedBy.equals(userEmail, ignoreCase = true)) {
+            onError("Only the locker owner can extend the timer.")
+            return
+        }
+        pendingLockerPayment = PendingLockerPayment(
+            lockerId = lockerId,
+            scannedQrValue = null,
+            selectedPlanId = PLAN_3H,
+            paymentMode = PAYMENT_MODE_EXTEND
         )
         persistPendingPayment(pendingLockerPayment)
         onSuccess()
@@ -211,7 +242,7 @@ class KeylessViewModel(application: Application) : AndroidViewModel(application)
         clearPersistedPendingPayment()
     }
 
-    fun completeLockerPaymentAndOccupy(
+    fun completeLockerPaymentAction(
         paidPlanId: String,
         onSuccess: (String) -> Unit,
         onError: (String) -> Unit
@@ -226,18 +257,43 @@ class KeylessViewModel(application: Application) : AndroidViewModel(application)
             onError("Unknown payment plan.")
             return
         }
-        occupyLocker(
-            lockerId = pending.lockerId,
-            scannedQrValue = pending.scannedQrValue,
-            durationSeconds = plan.durationSeconds,
-            onSuccess = {
-                val lockerId = pending.lockerId
-                pendingLockerPayment = null
-                clearPersistedPendingPayment()
-                onSuccess(lockerId)
-            },
-            onError = onError
-        )
+        when (pending.paymentMode) {
+            PAYMENT_MODE_OCCUPY -> {
+                val scannedQr = pending.scannedQrValue
+                if (scannedQr.isNullOrBlank()) {
+                    onError("Missing QR data for locker payment.")
+                    return
+                }
+                occupyLocker(
+                    lockerId = pending.lockerId,
+                    scannedQrValue = scannedQr,
+                    durationSeconds = plan.durationSeconds,
+                    onSuccess = {
+                        val lockerId = pending.lockerId
+                        pendingLockerPayment = null
+                        clearPersistedPendingPayment()
+                        onSuccess(lockerId)
+                    },
+                    onError = onError
+                )
+            }
+
+            PAYMENT_MODE_EXTEND -> {
+                extendLockerTimerByDuration(
+                    lockerId = pending.lockerId,
+                    additionalSeconds = plan.durationSeconds,
+                    onSuccess = {
+                        val lockerId = pending.lockerId
+                        pendingLockerPayment = null
+                        clearPersistedPendingPayment()
+                        onSuccess(lockerId)
+                    },
+                    onError = onError
+                )
+            }
+
+            else -> onError("Unknown payment mode.")
+        }
     }
 
     fun occupyLocker(
@@ -372,6 +428,169 @@ class KeylessViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    fun extendLockerTimer(
+        lockerId: String,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val userEmail = currentUser?.email
+        if (userEmail.isNullOrBlank()) {
+            onError("Please log in again.")
+            return
+        }
+        if (operationInProgress) return
+        operationInProgress = true
+
+        viewModelScope.launch {
+            val lockerRef = firestore.collection("lockers").document(lockerId)
+            try {
+                firestore.runTransaction { transaction ->
+                    val snapshot = transaction.get(lockerRef)
+                    val isOccupied = snapshot.getBoolean("isOccupied") ?: false
+                    val occupiedBy = snapshot.getString("occupiedBy").orEmpty()
+                    if (!isOccupied) {
+                        throw FirebaseFirestoreException(
+                            "Locker is not occupied.",
+                            FirebaseFirestoreException.Code.ABORTED
+                        )
+                    }
+                    if (!occupiedBy.equals(userEmail, ignoreCase = true)) {
+                        throw FirebaseFirestoreException(
+                            "Only the locker owner can extend the timer.",
+                            FirebaseFirestoreException.Code.PERMISSION_DENIED
+                        )
+                    }
+                    val currentDuration = snapshot.getLong("occupiedDurationSeconds")
+                        ?: DEFAULT_OCCUPANCY_SECONDS
+                    val extendedDuration = (currentDuration + TIMER_EXTENSION_SECONDS)
+                        .coerceAtMost(MAX_OCCUPANCY_SECONDS)
+                    transaction.set(
+                        lockerRef,
+                        mapOf(
+                            "occupiedDurationSeconds" to extendedDuration,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    )
+                }.await()
+                onSuccess()
+            } catch (error: Exception) {
+                onError(error.message ?: "Unable to extend locker timer.")
+            } finally {
+                operationInProgress = false
+            }
+        }
+    }
+
+    private fun extendLockerTimerByDuration(
+        lockerId: String,
+        additionalSeconds: Long,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val userEmail = currentUser?.email
+        if (userEmail.isNullOrBlank()) {
+            onError("Please log in again.")
+            return
+        }
+        if (operationInProgress) return
+        operationInProgress = true
+
+        viewModelScope.launch {
+            val lockerRef = firestore.collection("lockers").document(lockerId)
+            try {
+                firestore.runTransaction { transaction ->
+                    val snapshot = transaction.get(lockerRef)
+                    val isOccupied = snapshot.getBoolean("isOccupied") ?: false
+                    val occupiedBy = snapshot.getString("occupiedBy").orEmpty()
+                    if (!isOccupied) {
+                        throw FirebaseFirestoreException(
+                            "Locker is not occupied.",
+                            FirebaseFirestoreException.Code.ABORTED
+                        )
+                    }
+                    if (!occupiedBy.equals(userEmail, ignoreCase = true)) {
+                        throw FirebaseFirestoreException(
+                            "Only the locker owner can extend the timer.",
+                            FirebaseFirestoreException.Code.PERMISSION_DENIED
+                        )
+                    }
+                    val currentDuration = snapshot.getLong("occupiedDurationSeconds")
+                        ?: DEFAULT_OCCUPANCY_SECONDS
+                    val extendedDuration = (currentDuration + additionalSeconds)
+                        .coerceAtMost(MAX_OCCUPANCY_SECONDS)
+                    transaction.set(
+                        lockerRef,
+                        mapOf(
+                            "occupiedDurationSeconds" to extendedDuration,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    )
+                }.await()
+                onSuccess()
+            } catch (error: Exception) {
+                onError(error.message ?: "Unable to extend locker timer.")
+            } finally {
+                operationInProgress = false
+            }
+        }
+    }
+
+    fun cancelLockerTimer(
+        lockerId: String,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val userEmail = currentUser?.email
+        if (userEmail.isNullOrBlank()) {
+            onError("Please log in again.")
+            return
+        }
+        if (operationInProgress) return
+        operationInProgress = true
+
+        viewModelScope.launch {
+            val lockerRef = firestore.collection("lockers").document(lockerId)
+            try {
+                firestore.runTransaction { transaction ->
+                    val snapshot = transaction.get(lockerRef)
+                    val isOccupied = snapshot.getBoolean("isOccupied") ?: false
+                    val occupiedBy = snapshot.getString("occupiedBy").orEmpty()
+                    if (!isOccupied) {
+                        throw FirebaseFirestoreException(
+                            "Locker is not occupied.",
+                            FirebaseFirestoreException.Code.ABORTED
+                        )
+                    }
+                    if (!occupiedBy.equals(userEmail, ignoreCase = true)) {
+                        throw FirebaseFirestoreException(
+                            "Only the locker owner can cancel the timer.",
+                            FirebaseFirestoreException.Code.PERMISSION_DENIED
+                        )
+                    }
+                    transaction.set(
+                        lockerRef,
+                        mapOf(
+                            "isOccupied" to false,
+                            "occupiedBy" to null,
+                            "occupiedAt" to null,
+                            "occupiedDurationSeconds" to DEFAULT_OCCUPANCY_SECONDS,
+                            "doorState" to DOOR_CLOSED,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    )
+                }.await()
+                onSuccess()
+            } catch (error: Exception) {
+                onError(error.message ?: "Unable to cancel locker timer.")
+            } finally {
+                operationInProgress = false
+            }
+        }
+    }
+
     private fun isValidLockerQr(lockerId: String, scannedQrValue: String): Boolean {
         val normalizedValue = scannedQrValue.trim().lowercase()
         val allowed = when (lockerId) {
@@ -397,9 +616,14 @@ class KeylessViewModel(application: Application) : AndroidViewModel(application)
         private const val PREF_PENDING_LOCKER_ID = "pref_pending_locker_id"
         private const val PREF_PENDING_SCANNED_QR = "pref_pending_scanned_qr"
         private const val PREF_PENDING_PLAN_ID = "pref_pending_plan_id"
+        private const val PREF_PENDING_PAYMENT_MODE = "pref_pending_payment_mode"
 
         const val LOCKER_1_ID = "locker_1"
         const val DEFAULT_OCCUPANCY_SECONDS = 30L * 60L
+        const val TIMER_EXTENSION_SECONDS = 3L * 60L * 60L
+        const val MAX_OCCUPANCY_SECONDS = 7L * 24L * 60L * 60L
+        const val PAYMENT_MODE_OCCUPY = "occupy"
+        const val PAYMENT_MODE_EXTEND = "extend"
         const val PLAN_3H = "3h"
         const val PLAN_12H = "12h"
         const val PLAN_24H = "24h"
@@ -459,8 +683,9 @@ class KeylessViewModel(application: Application) : AndroidViewModel(application)
         }
         prefs.edit()
             .putString(PREF_PENDING_LOCKER_ID, pending.lockerId)
-            .putString(PREF_PENDING_SCANNED_QR, pending.scannedQrValue)
+            .putString(PREF_PENDING_SCANNED_QR, pending.scannedQrValue ?: "")
             .putString(PREF_PENDING_PLAN_ID, pending.selectedPlanId)
+            .putString(PREF_PENDING_PAYMENT_MODE, pending.paymentMode)
             .apply()
     }
 
@@ -469,18 +694,22 @@ class KeylessViewModel(application: Application) : AndroidViewModel(application)
             .remove(PREF_PENDING_LOCKER_ID)
             .remove(PREF_PENDING_SCANNED_QR)
             .remove(PREF_PENDING_PLAN_ID)
+            .remove(PREF_PENDING_PAYMENT_MODE)
             .apply()
     }
 
     private fun restorePendingPayment() {
         if (pendingLockerPayment != null) return
         val lockerId = prefs.getString(PREF_PENDING_LOCKER_ID, null) ?: return
-        val scannedQr = prefs.getString(PREF_PENDING_SCANNED_QR, null) ?: return
+        val scannedQr = prefs.getString(PREF_PENDING_SCANNED_QR, null)
         val planId = prefs.getString(PREF_PENDING_PLAN_ID, PLAN_3H) ?: PLAN_3H
+        val paymentMode = prefs.getString(PREF_PENDING_PAYMENT_MODE, PAYMENT_MODE_OCCUPY)
+            ?: PAYMENT_MODE_OCCUPY
         pendingLockerPayment = PendingLockerPayment(
             lockerId = lockerId,
-            scannedQrValue = scannedQr,
-            selectedPlanId = planId
+            scannedQrValue = scannedQr?.takeIf { it.isNotBlank() },
+            selectedPlanId = planId,
+            paymentMode = paymentMode
         )
     }
 }

@@ -36,6 +36,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedButton
@@ -253,7 +254,7 @@ fun KeylessApp(keylessViewModel: KeylessViewModel = viewModel()) {
                 title = "Payment Success",
                 message = "Finalizing locker payment...",
                 onProcess = { onDone ->
-                    keylessViewModel.completeLockerPaymentAndOccupy(
+                    keylessViewModel.completeLockerPaymentAction(
                         paidPlanId = planId,
                         onSuccess = { completedLockerId ->
                             onDone()
@@ -304,7 +305,8 @@ fun KeylessApp(keylessViewModel: KeylessViewModel = viewModel()) {
                 keylessViewModel = keylessViewModel,
                 loading = keylessViewModel.operationInProgress,
                 onBack = { navController.popBackStack() },
-                onScanQr = { navController.navigate(Routes.scanner(lockerId)) }
+                onScanQr = { navController.navigate(Routes.scanner(lockerId)) },
+                onOpenExtensionPayment = { navController.navigate(Routes.payment(lockerId)) }
             )
         }
 
@@ -902,7 +904,8 @@ private fun LockerDetailScreen(
     keylessViewModel: KeylessViewModel,
     loading: Boolean,
     onBack: () -> Unit,
-    onScanQr: () -> Unit
+    onScanQr: () -> Unit,
+    onOpenExtensionPayment: () -> Unit
 ) {
     var lockerStatus by remember(lockerId) {
         mutableStateOf(
@@ -919,6 +922,8 @@ private fun LockerDetailScreen(
     }
     var listenerError by rememberSaveable(lockerId) { mutableStateOf<String?>(null) }
     var nowMillis by remember { mutableStateOf(System.currentTimeMillis()) }
+    var showExtendConfirmDialog by rememberSaveable(lockerId) { mutableStateOf(false) }
+    var showCancelConfirmDialog by rememberSaveable(lockerId) { mutableStateOf(false) }
 
     DisposableEffect(lockerId) {
         val registration = keylessViewModel.observeLocker(
@@ -1105,6 +1110,36 @@ private fun LockerDetailScreen(
                                 Text("Close")
                             }
                         }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Button(
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    showExtendConfirmDialog = true
+                                },
+                                enabled = !loading,
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text("Extend Timer")
+                            }
+                            OutlinedButton(
+                                modifier = Modifier.weight(1f),
+                                onClick = {
+                                    showCancelConfirmDialog = true
+                                },
+                                enabled = !loading,
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text("Cancel Timer")
+                            }
+                        }
+                        Text(
+                            text = "Extensions require another payment. Duration follows the plan you choose.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }
@@ -1159,6 +1194,73 @@ private fun LockerDetailScreen(
                 }
             }
         }
+    }
+
+    if (showExtendConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showExtendConfirmDialog = false },
+            title = { Text("Extend Locker Timer?") },
+            text = { Text("You will be redirected to Stripe and need to pay again to extend your timer.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        keylessViewModel.prepareLockerExtensionPayment(
+                            lockerId = lockerId,
+                            onSuccess = {
+                                showExtendConfirmDialog = false
+                                onOpenExtensionPayment()
+                            },
+                            onError = {
+                                showExtendConfirmDialog = false
+                                listenerError = it
+                            }
+                        )
+                    },
+                    enabled = !loading
+                ) {
+                    Text("Confirm")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showExtendConfirmDialog = false },
+                    enabled = !loading
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showCancelConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showCancelConfirmDialog = false },
+            title = { Text("Cancel Locker Timer?") },
+            text = { Text("This will release the locker immediately. Payments are non-refundable.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        keylessViewModel.cancelLockerTimer(
+                                        lockerId = lockerId,
+                                        onSuccess = { },
+                                        onError = { listenerError = it }
+                                    )
+                        showCancelConfirmDialog = false
+                    },
+                    enabled = !loading
+                ) {
+                    Text("Confirm")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showCancelConfirmDialog = false },
+                    enabled = !loading
+                ) {
+                    Text("Keep Timer")
+                }
+            }
+        )
     }
 }
 
