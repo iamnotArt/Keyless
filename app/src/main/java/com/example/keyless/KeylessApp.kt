@@ -1,8 +1,15 @@
 package com.example.keyless
 
 import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.widget.Toast
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -35,6 +42,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -111,10 +119,17 @@ private data class LockerGridItem(
 fun KeylessApp(keylessViewModel: KeylessViewModel = viewModel()) {
     val navController = rememberNavController()
     val context = LocalContext.current
+    val hasInternetConnection = rememberInternetAvailability()
+    val isLoggedIn = keylessViewModel.currentUser != null
     val startDestination = if (keylessViewModel.currentUser != null) {
         destinationForUser(keylessViewModel.currentUser?.email)
     } else {
         Routes.LOGIN
+    }
+
+    if (isLoggedIn && !hasInternetConnection) {
+        ReconnectingScreen()
+        return
     }
 
     NavHost(
@@ -333,6 +348,90 @@ fun KeylessApp(keylessViewModel: KeylessViewModel = viewModel()) {
                     )
                 }
             )
+        }
+    }
+}
+
+@Composable
+private fun rememberInternetAvailability(): Boolean {
+    val context = LocalContext.current
+    val connectivityManager = remember(context) {
+        context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    }
+    var hasInternet by remember { mutableStateOf(connectivityManager.hasValidatedInternetConnection()) }
+
+    DisposableEffect(connectivityManager) {
+        val mainHandler = Handler(Looper.getMainLooper())
+        fun refreshState() {
+            mainHandler.post {
+                hasInternet = connectivityManager.hasValidatedInternetConnection()
+            }
+        }
+
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = refreshState()
+            override fun onLost(network: Network) = refreshState()
+            override fun onUnavailable() = refreshState()
+            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                refreshState()
+            }
+        }
+
+        var callbackRegistered = false
+        runCatching {
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            connectivityManager.registerNetworkCallback(request, callback)
+            callbackRegistered = true
+            refreshState()
+        }.onFailure {
+            hasInternet = true
+        }
+
+        onDispose {
+            if (callbackRegistered) {
+                runCatching { connectivityManager.unregisterNetworkCallback(callback) }
+            }
+        }
+    }
+    return hasInternet
+}
+
+private fun ConnectivityManager.hasValidatedInternetConnection(): Boolean {
+    val active = activeNetwork ?: return false
+    val capabilities = getNetworkCapabilities(active) ?: return false
+    return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+        capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+}
+
+@Composable
+private fun ReconnectingScreen() {
+    Scaffold { padding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(24.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                CircularProgressIndicator()
+                Text(
+                    text = "Reconnecting...",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "No internet connection. App content will resume automatically once connection is stable.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
 }
