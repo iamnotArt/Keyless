@@ -1,10 +1,11 @@
 package com.example.keyless
 
+import android.app.Application
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.setValue
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
@@ -28,10 +29,25 @@ data class LockerStatus(
     val doorState: String
 )
 
-class KeylessViewModel : ViewModel() {
+data class PendingLockerPayment(
+    val lockerId: String,
+    val scannedQrValue: String,
+    val selectedPlanId: String
+)
+
+data class LockerPaymentPlan(
+    val id: String,
+    val label: String,
+    val priceLabel: String,
+    val durationSeconds: Long
+)
+
+class KeylessViewModel(application: Application) : AndroidViewModel(application) {
     private val auth = FirebaseAuth.getInstance()
     private val firestore = FirebaseFirestore.getInstance()
     private val lockerStatusCache = mutableStateMapOf<String, LockerStatus>()
+    private val appContext = application.applicationContext
+    private val prefs = appContext.getSharedPreferences(PREFS_NAME, 0)
 
     private val authListener = FirebaseAuth.AuthStateListener { firebaseAuth ->
         currentUser = firebaseAuth.currentUser
@@ -46,6 +62,9 @@ class KeylessViewModel : ViewModel() {
     var operationInProgress by mutableStateOf(false)
         private set
 
+    var pendingLockerPayment by mutableStateOf<PendingLockerPayment?>(null)
+        private set
+
     init {
         // Keep Firestore local cache enabled for smoother UI updates and offline reads.
         runCatching {
@@ -58,6 +77,7 @@ class KeylessViewModel : ViewModel() {
                 .build()
         }
         auth.addAuthStateListener(authListener)
+        restorePendingPayment()
         if (currentUser != null) {
             ensureLockerSeeded()
         }
@@ -155,9 +175,75 @@ class KeylessViewModel : ViewModel() {
 
     fun cachedLockerStatus(lockerId: String): LockerStatus? = lockerStatusCache[lockerId]
 
+    fun prepareLockerPayment(
+        lockerId: String,
+        scannedQrValue: String,
+        onSuccess: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val userEmail = currentUser?.email
+        if (userEmail.isNullOrBlank()) {
+            onError("Please log in again.")
+            return
+        }
+        if (!isValidLockerQr(lockerId, scannedQrValue)) {
+            onError("That QR code does not match ${lockerLabel(lockerId)}.")
+            return
+        }
+        pendingLockerPayment = PendingLockerPayment(
+            lockerId = lockerId,
+            scannedQrValue = scannedQrValue,
+            selectedPlanId = PLAN_3H
+        )
+        persistPendingPayment(pendingLockerPayment)
+        onSuccess()
+    }
+
+    fun selectPendingPaymentPlan(planId: String) {
+        val pending = pendingLockerPayment ?: return
+        if (paymentPlanById(planId) == null) return
+        pendingLockerPayment = pending.copy(selectedPlanId = planId)
+        persistPendingPayment(pendingLockerPayment)
+    }
+
+    fun clearPendingLockerPayment() {
+        pendingLockerPayment = null
+        clearPersistedPendingPayment()
+    }
+
+    fun completeLockerPaymentAndOccupy(
+        paidPlanId: String,
+        onSuccess: (String) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val pending = pendingLockerPayment
+        if (pending == null) {
+            onError("No pending locker payment found.")
+            return
+        }
+        val plan = paymentPlanById(paidPlanId)
+        if (plan == null) {
+            onError("Unknown payment plan.")
+            return
+        }
+        occupyLocker(
+            lockerId = pending.lockerId,
+            scannedQrValue = pending.scannedQrValue,
+            durationSeconds = plan.durationSeconds,
+            onSuccess = {
+                val lockerId = pending.lockerId
+                pendingLockerPayment = null
+                clearPersistedPendingPayment()
+                onSuccess(lockerId)
+            },
+            onError = onError
+        )
+    }
+
     fun occupyLocker(
         lockerId: String,
         scannedQrValue: String,
+        durationSeconds: Long = DEFAULT_OCCUPANCY_SECONDS,
         onSuccess: () -> Unit,
         onError: (String) -> Unit
     ) {
@@ -199,7 +285,7 @@ class KeylessViewModel : ViewModel() {
                             "isOccupied" to true,
                             "occupiedBy" to userEmail,
                             "occupiedAt" to FieldValue.serverTimestamp(),
-                            "occupiedDurationSeconds" to DEFAULT_OCCUPANCY_SECONDS,
+                            "occupiedDurationSeconds" to durationSeconds,
                             "doorState" to DOOR_CLOSED,
                             "updatedAt" to FieldValue.serverTimestamp()
                         ),
@@ -307,10 +393,38 @@ class KeylessViewModel : ViewModel() {
     }
 
     companion object {
+        private const val PREFS_NAME = "keyless_payment_prefs"
+        private const val PREF_PENDING_LOCKER_ID = "pref_pending_locker_id"
+        private const val PREF_PENDING_SCANNED_QR = "pref_pending_scanned_qr"
+        private const val PREF_PENDING_PLAN_ID = "pref_pending_plan_id"
+
         const val LOCKER_1_ID = "locker_1"
         const val DEFAULT_OCCUPANCY_SECONDS = 30L * 60L
+        const val PLAN_3H = "3h"
+        const val PLAN_12H = "12h"
+        const val PLAN_24H = "24h"
         const val DOOR_OPEN = "open"
         const val DOOR_CLOSED = "closed"
+        val PAYMENT_PLANS = listOf(
+            LockerPaymentPlan(
+                id = PLAN_3H,
+                label = "3 Hours",
+                priceLabel = "PHP 50",
+                durationSeconds = 3L * 60L * 60L
+            ),
+            LockerPaymentPlan(
+                id = PLAN_12H,
+                label = "12 Hours",
+                priceLabel = "PHP 75",
+                durationSeconds = 12L * 60L * 60L
+            ),
+            LockerPaymentPlan(
+                id = PLAN_24H,
+                label = "24 Hours",
+                priceLabel = "PHP 100",
+                durationSeconds = 24L * 60L * 60L
+            )
+        )
 
         fun lockerLabel(lockerId: String): String {
             return when (lockerId) {
@@ -332,5 +446,41 @@ class KeylessViewModel : ViewModel() {
             val remaining = remainingTimeMillis(status, nowMillis)
             return status.isOccupied && (remaining == null || remaining > 0)
         }
+
+        fun paymentPlanById(planId: String): LockerPaymentPlan? {
+            return PAYMENT_PLANS.firstOrNull { it.id == planId }
+        }
+    }
+
+    private fun persistPendingPayment(pending: PendingLockerPayment?) {
+        if (pending == null) {
+            clearPersistedPendingPayment()
+            return
+        }
+        prefs.edit()
+            .putString(PREF_PENDING_LOCKER_ID, pending.lockerId)
+            .putString(PREF_PENDING_SCANNED_QR, pending.scannedQrValue)
+            .putString(PREF_PENDING_PLAN_ID, pending.selectedPlanId)
+            .apply()
+    }
+
+    private fun clearPersistedPendingPayment() {
+        prefs.edit()
+            .remove(PREF_PENDING_LOCKER_ID)
+            .remove(PREF_PENDING_SCANNED_QR)
+            .remove(PREF_PENDING_PLAN_ID)
+            .apply()
+    }
+
+    private fun restorePendingPayment() {
+        if (pendingLockerPayment != null) return
+        val lockerId = prefs.getString(PREF_PENDING_LOCKER_ID, null) ?: return
+        val scannedQr = prefs.getString(PREF_PENDING_SCANNED_QR, null) ?: return
+        val planId = prefs.getString(PREF_PENDING_PLAN_ID, PLAN_3H) ?: PLAN_3H
+        pendingLockerPayment = PendingLockerPayment(
+            lockerId = lockerId,
+            scannedQrValue = scannedQr,
+            selectedPlanId = planId
+        )
     }
 }

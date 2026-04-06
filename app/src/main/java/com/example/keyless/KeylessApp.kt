@@ -1,5 +1,8 @@
 package com.example.keyless
 
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
 import android.widget.Toast
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -65,6 +68,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import androidx.navigation.navDeepLink
 import com.example.keyless.KeylessViewModel.Companion.LOCKER_1_ID
 import com.example.keyless.ui.theme.AvailableGreen
 import com.example.keyless.ui.theme.DisabledLocker
@@ -77,12 +81,22 @@ private object Routes {
     const val SIGN_UP = "sign_up"
     const val LOCKER_DISPLAY = "locker_display"
     const val LOCKERS = "lockers"
+    const val PAYMENT = "payment"
+    const val PAYMENT_SUCCESS = "payment_success"
+    const val PAYMENT_CANCEL = "payment_cancel"
     const val LOCKER_DETAIL = "locker_detail"
     const val QR_SCANNER = "qr_scanner"
 
+    fun payment(lockerId: String): String = "$PAYMENT/$lockerId"
+    fun paymentSuccess(lockerId: String, planId: String): String = "$PAYMENT_SUCCESS/$lockerId/$planId"
+    fun paymentCancel(lockerId: String, planId: String): String = "$PAYMENT_CANCEL/$lockerId/$planId"
     fun lockerDetail(lockerId: String): String = "$LOCKER_DETAIL/$lockerId"
     fun scanner(lockerId: String): String = "$QR_SCANNER/$lockerId"
 }
+
+private const val STRIPE_TEST_PAYMENT_LINK_3H = "https://buy.stripe.com/test_14AeVceC89Kj2iG4n02oE00"
+private const val STRIPE_TEST_PAYMENT_LINK_12H = "https://buy.stripe.com/test_3cI14m51y3lV3mKdXA2oE01"
+private const val STRIPE_TEST_PAYMENT_LINK_24H = "https://buy.stripe.com/test_14A3cu9hO9Kj6yWbPs2oE02"
 
 private data class LockerGridItem(
     val id: String,
@@ -186,6 +200,101 @@ fun KeylessApp(keylessViewModel: KeylessViewModel = viewModel()) {
         }
 
         composable(
+            route = "${Routes.PAYMENT}/{lockerId}",
+            arguments = listOf(navArgument("lockerId") { type = NavType.StringType })
+        ) { backStackEntry ->
+            val lockerId = backStackEntry.arguments?.getString("lockerId").orEmpty()
+            val pendingPayment = keylessViewModel.pendingLockerPayment
+            val selectedPlanId = pendingPayment?.selectedPlanId ?: KeylessViewModel.PLAN_3H
+            PaymentScreen(
+                lockerId = lockerId,
+                pendingLockerPayment = pendingPayment,
+                paymentPlans = KeylessViewModel.PAYMENT_PLANS,
+                selectedPlanId = selectedPlanId,
+                onBack = {
+                    keylessViewModel.clearPendingLockerPayment()
+                    navController.popBackStack()
+                },
+                onSelectPlan = { keylessViewModel.selectPendingPaymentPlan(it) },
+                onOpenStripe = {
+                    val paymentLink = stripePaymentLinkForPlan(selectedPlanId)
+                    if (paymentLink == null) {
+                        Toast.makeText(
+                            context,
+                            "Please replace the Stripe test link for $selectedPlanId in KeylessApp.kt",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    } else {
+                        openExternalUrl(
+                            context = context,
+                            url = paymentLink,
+                            onError = { message ->
+                                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                            }
+                        )
+                    }
+                }
+            )
+        }
+
+        composable(
+            route = "${Routes.PAYMENT_SUCCESS}/{lockerId}/{planId}",
+            arguments = listOf(
+                navArgument("lockerId") { type = NavType.StringType },
+                navArgument("planId") { type = NavType.StringType }
+            ),
+            deepLinks = listOf(
+                navDeepLink { uriPattern = "keyless://stripe/success/{lockerId}/{planId}" }
+            )
+        ) { backStackEntry ->
+            val lockerId = backStackEntry.arguments?.getString("lockerId").orEmpty()
+            val planId = backStackEntry.arguments?.getString("planId").orEmpty()
+            PaymentResultScreen(
+                title = "Payment Success",
+                message = "Finalizing locker payment...",
+                onProcess = { onDone ->
+                    keylessViewModel.completeLockerPaymentAndOccupy(
+                        paidPlanId = planId,
+                        onSuccess = { completedLockerId ->
+                            onDone()
+                            navController.navigate(Routes.lockerDetail(completedLockerId)) {
+                                popUpTo(navController.graph.id)
+                            }
+                        },
+                        onError = { error ->
+                            onDone()
+                            Toast.makeText(context, error, Toast.LENGTH_SHORT).show()
+                            navController.navigate(Routes.payment(lockerId))
+                        }
+                    )
+                }
+            )
+        }
+
+        composable(
+            route = "${Routes.PAYMENT_CANCEL}/{lockerId}/{planId}",
+            arguments = listOf(
+                navArgument("lockerId") { type = NavType.StringType },
+                navArgument("planId") { type = NavType.StringType }
+            ),
+            deepLinks = listOf(
+                navDeepLink { uriPattern = "keyless://stripe/cancel/{lockerId}/{planId}" }
+            )
+        ) { backStackEntry ->
+            val lockerId = backStackEntry.arguments?.getString("lockerId").orEmpty()
+            PaymentResultScreen(
+                title = "Payment Canceled",
+                message = "Payment was canceled. You can try again.",
+                onProcess = { onDone ->
+                    onDone()
+                    navController.navigate(Routes.payment(lockerId)) {
+                        popUpTo(Routes.payment(lockerId)) { inclusive = true }
+                    }
+                }
+            )
+        }
+
+        composable(
             route = "${Routes.LOCKER_DETAIL}/{lockerId}",
             arguments = listOf(navArgument("lockerId") { type = NavType.StringType })
         ) { backStackEntry ->
@@ -212,10 +321,10 @@ fun KeylessApp(keylessViewModel: KeylessViewModel = viewModel()) {
                 onBack = { navController.popBackStack() },
                 onScanned = { qrValue ->
                     scannerError = null
-                    keylessViewModel.occupyLocker(
+                    keylessViewModel.prepareLockerPayment(
                         lockerId = lockerId,
                         scannedQrValue = qrValue,
-                        onSuccess = { navController.popBackStack() },
+                        onSuccess = { navController.navigate(Routes.payment(lockerId)) },
                         onError = { scannerError = it }
                     )
                 }
@@ -433,6 +542,193 @@ private fun SignUpScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+private fun PaymentScreen(
+    lockerId: String,
+    pendingLockerPayment: PendingLockerPayment?,
+    paymentPlans: List<LockerPaymentPlan>,
+    selectedPlanId: String,
+    onBack: () -> Unit,
+    onSelectPlan: (String) -> Unit,
+    onOpenStripe: () -> Unit
+) {
+    val hasPendingPayment = pendingLockerPayment?.lockerId == lockerId
+    val selectedPlan = paymentPlans.firstOrNull { it.id == selectedPlanId }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Stripe Test Payment") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back"
+                        )
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "Locker 1 Payment",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Choose a timer plan and continue to Stripe test checkout.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = "Test card: 4242 4242 4242 4242",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.background),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "Choose Timer Plan",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    paymentPlans.forEach { plan ->
+                        val isSelected = selectedPlanId == plan.id
+                        OutlinedButton(
+                            onClick = { onSelectPlan(plan.id) },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = if (isSelected) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surface
+                                }
+                            )
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(plan.label)
+                                Text(plan.priceLabel, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!hasPendingPayment) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Text(
+                        modifier = Modifier.padding(12.dp),
+                        text = "Payment session expired. Please scan locker QR again.",
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+            }
+
+            Button(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp),
+                onClick = onOpenStripe,
+                shape = RoundedCornerShape(14.dp),
+                enabled = hasPendingPayment && selectedPlan != null
+            ) {
+                val buttonLabel = if (selectedPlan != null) {
+                    "Pay ${selectedPlan.priceLabel} with Stripe"
+                } else {
+                    "Open Stripe Test Checkout"
+                }
+                Text(buttonLabel)
+            }
+            Text(
+                text = "Payments are non-refundable.",
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun PaymentResultScreen(
+    title: String,
+    message: String,
+    onProcess: (onDone: () -> Unit) -> Unit
+) {
+    var handled by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        if (!handled) {
+            handled = true
+            onProcess { }
+        }
+    }
+
+    Scaffold { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(24.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
 private fun LockerGridScreen(
     userEmail: String,
     keylessViewModel: KeylessViewModel,
@@ -558,9 +854,9 @@ private fun LockerGridCard(
     }?.let { remaining: Long -> formatRemainingTime(remaining) }
     val statusLabel = when {
         !locker.enabled -> "Coming Soon"
-        isOwnedByCurrentUser && remainingLabel != null -> "Your Locker • $remainingLabel"
+        isOwnedByCurrentUser && remainingLabel != null -> "Your Locker - $remainingLabel"
         isOwnedByCurrentUser -> "Your Locker"
-        isOccupied && remainingLabel != null -> "Occupied • $remainingLabel"
+        isOccupied && remainingLabel != null -> "Occupied - $remainingLabel"
         isOccupied -> "Occupied"
         else -> "Available"
     }
@@ -909,3 +1205,29 @@ private fun formatRemainingTime(remainingMillis: Long): String {
     val seconds = totalSeconds % 60
     return String.format("%02d:%02d", minutes, seconds)
 }
+
+private fun stripePaymentLinkForPlan(planId: String): String? {
+    val url = when (planId) {
+        KeylessViewModel.PLAN_3H -> STRIPE_TEST_PAYMENT_LINK_3H
+        KeylessViewModel.PLAN_12H -> STRIPE_TEST_PAYMENT_LINK_12H
+        KeylessViewModel.PLAN_24H -> STRIPE_TEST_PAYMENT_LINK_24H
+        else -> ""
+    }
+    return if (url.startsWith("REPLACE_WITH_")) null else url
+}
+
+private fun openExternalUrl(
+    context: android.content.Context,
+    url: String,
+    onError: (String) -> Unit
+) {
+    try {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+        context.startActivity(intent)
+    } catch (_: ActivityNotFoundException) {
+        onError("No browser app found on this device.")
+    } catch (_: Exception) {
+        onError("Unable to open Stripe checkout link.")
+    }
+}
+
