@@ -314,6 +314,9 @@ class KeylessViewModel(application: Application) : AndroidViewModel(application)
         }
         if (operationInProgress) return
         operationInProgress = true
+        val requestedDurationSeconds = durationSeconds
+            .coerceAtLeast(1L)
+            .coerceAtMost(MAX_OCCUPANCY_SECONDS)
 
         viewModelScope.launch {
             val lockerRef = firestore.collection("lockers").document(lockerId)
@@ -322,10 +325,10 @@ class KeylessViewModel(application: Application) : AndroidViewModel(application)
                     val snapshot = transaction.get(lockerRef)
                     val isOccupied = snapshot.getBoolean("isOccupied") ?: false
                     val occupiedAt = snapshot.getTimestamp("occupiedAt")
-                    val durationSeconds = snapshot.getLong("occupiedDurationSeconds")
+                    val existingDurationSeconds = snapshot.getLong("occupiedDurationSeconds")
                         ?: DEFAULT_OCCUPANCY_SECONDS
                     val isExpired = occupiedAt != null &&
-                        System.currentTimeMillis() >= occupiedAt.toDate().time + (durationSeconds * 1000)
+                        System.currentTimeMillis() >= occupiedAt.toDate().time + (existingDurationSeconds * 1000)
 
                     if (isOccupied && !isExpired) {
                         throw FirebaseFirestoreException(
@@ -341,7 +344,7 @@ class KeylessViewModel(application: Application) : AndroidViewModel(application)
                             "isOccupied" to true,
                             "occupiedBy" to userEmail,
                             "occupiedAt" to FieldValue.serverTimestamp(),
-                            "occupiedDurationSeconds" to durationSeconds,
+                            "occupiedDurationSeconds" to requestedDurationSeconds,
                             "doorState" to DOOR_CLOSED,
                             "updatedAt" to FieldValue.serverTimestamp()
                         ),
