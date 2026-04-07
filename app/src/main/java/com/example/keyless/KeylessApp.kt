@@ -1069,7 +1069,7 @@ private fun LockerDetailScreen(
     } else {
         "Locker is available and ready for QR verification."
     }
-
+// TEST
     Scaffold(
         topBar = {
             TopAppBar(
