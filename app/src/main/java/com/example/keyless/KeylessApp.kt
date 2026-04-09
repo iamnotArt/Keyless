@@ -119,12 +119,17 @@ private data class LockerGridItem(
 fun KeylessApp(keylessViewModel: KeylessViewModel = viewModel()) {
     val navController = rememberNavController()
     val context = LocalContext.current
+    val mqttManager = remember { MqttManager(context) }
     val hasInternetConnection = rememberInternetAvailability()
     val isLoggedIn = keylessViewModel.currentUser != null
     val startDestination = if (keylessViewModel.currentUser != null) {
         destinationForUser(keylessViewModel.currentUser?.email)
     } else {
         Routes.LOGIN
+    }
+
+    LaunchedEffect(Unit) {
+        mqttManager.connect()
     }
 
     if (isLoggedIn && !hasInternetConnection) {
@@ -320,6 +325,7 @@ fun KeylessApp(keylessViewModel: KeylessViewModel = viewModel()) {
             LockerDetailScreen(
                 lockerId = lockerId,
                 keylessViewModel = keylessViewModel,
+                mqttManager = mqttManager,
                 loading = keylessViewModel.operationInProgress,
                 onBack = { navController.popBackStack() },
                 onScanQr = { navController.navigate(Routes.scanner(lockerId)) },
@@ -1004,6 +1010,7 @@ private fun LockerGridCard(
 private fun LockerDetailScreen(
     lockerId: String,
     keylessViewModel: KeylessViewModel,
+    mqttManager: MqttManager,
     loading: Boolean,
     onBack: () -> Unit,
     onScanQr: () -> Unit,
@@ -1184,6 +1191,8 @@ private fun LockerDetailScreen(
                             Button(
                                 modifier = Modifier.weight(1f),
                                 onClick = {
+                                    mqttManager.publish("""{"command":"OPEN"}""")
+
                                     keylessViewModel.setLockerDoorState(
                                         lockerId = lockerId,
                                         open = true,
@@ -1199,6 +1208,8 @@ private fun LockerDetailScreen(
                             OutlinedButton(
                                 modifier = Modifier.weight(1f),
                                 onClick = {
+                                    mqttManager.publish("""{"command":"CLOSE"}""")
+
                                     keylessViewModel.setLockerDoorState(
                                         lockerId = lockerId,
                                         open = false,

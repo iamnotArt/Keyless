@@ -16,6 +16,14 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Keyless">
+
+        <service
+            android:name="info.mqtt.android.service.MqttService"
+            android:exported="true" />
+        <receiver
+            android:name="info.mqtt.android.service.MqttService$AlarmReceiver"
+            android:exported="true" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
