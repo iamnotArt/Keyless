@@ -16,6 +16,8 @@ lifecycleViewmodelCompose = "2.9.0"
 googleServices = "4.4.3"
 kotlinxCoroutinesPlayServices = "1.8.1"
 zxingCore = "3.5.3"
+mqttAndroid = "4.4.3"
+mqttPaho = "1.2.5"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -44,6 +46,8 @@ androidx-camerax-view = { group = "androidx.camera", name = "camera-view", versi
 google-mlkit-barcode-scanning = { group = "com.google.mlkit", name = "barcode-scanning", version.ref = "mlkitBarcode" }
 google-zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxingCore" }
 kotlinx-coroutines-play-services = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-play-services", version.ref = "kotlinxCoroutinesPlayServices" }
+mqtt-android = { group = "com.github.hannesa2", name = "paho.mqtt.android", version.ref = "mqttAndroid" }
+mqtt-paho = { group = "org.eclipse.paho", name = "org.eclipse.paho.client.mqttv3", version.ref = "mqttPaho" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
