@@ -60,7 +60,6 @@ dependencies {
     implementation(libs.google.mlkit.barcode.scanning)
     implementation(libs.google.zxing.core)
     implementation(libs.kotlinx.coroutines.play.services)
-    implementation("com.github.hannesa2:paho.mqtt.android:4.4.3")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
